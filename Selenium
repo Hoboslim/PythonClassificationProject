@@ -1,0 +1,171 @@
+import requests 
+from bs4 import BeautifulSoup
+import os
+import subprocess
+import pandas as pd
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+import time
+
+
+def hamta_artikel_selenium(url: str) -> str:
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    
+    
+    
+    driver = webdriver.Chrome(options=options)
+    try:
+        driver.get(url)
+        time.sleep(5)
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+    finally:
+        driver.quit()
+    
+    delar = []
+    rubrik = soup.find("h1")
+    if rubrik:
+        delar.append(rubrik.get_text(strip=True))
+        
+    ingress = soup.find("h2")
+    if ingress:
+        delar.append(ingress.get_text(strip=True))
+        
+    artikel = soup.find("article")
+    if artikel:
+        paragraphs = artikel.find_all("p")
+    else:
+        paragraphs = soup.find_all("p")
+        
+    brodtext = " ".join([p.get_text(strip=True) for p in paragraphs])
+    if brodtext:
+        delar.append(brodtext)
+    
+    return "\n\n".join(delar)
+        
+
+url ="https://aftonbladet.se/senastenytt"
+
+options = Options()
+options.add_argument("--headless=new")
+options.add_argument("--disable-gpu")
+options.add_argument("--no-sandbox")
+
+driver = webdriver.Chrome(options=options)
+driver.get(url)
+time.sleep(3)
+html = driver.page_source
+driver.quit()
+
+soup = BeautifulSoup(html, "html.parser")
+os.makedirs("artiklar", exist_ok=True)
+
+rubriker = soup.find_all("h2")
+rows = []
+datum = datetime.now().strftime("%d-%m-%Y, %H:%M")
+
+links = soup.find_all("a", href=True)
+article_links = []
+for link in links:
+    href = link["href"]
+    text = link.get_text(strip=True)
+    # Example: Only keep links that look like articles
+    if len(text) > 10 and href.startswith("/"):
+        article_links.append((href, text))
+
+for i, (article_url, rubrik_text) in enumerate(article_links[:15]):
+    if not article_url.startswith("http"):
+        article_url = "https://aftonbladet.se/senastenytt" + article_url
+
+    article_text = hamta_artikel_selenium(article_url)
+    if not article_text.strip():
+        print(f"Hoppar över tom artikel: {article_url}")
+        continue
+
+    filename = f"artiklar/artikel{i+1}.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(article_text)
+    print(f"sparade {filename}")
+
+    Kategori_prompt = f"""
+        kategorisera följande artikel i en relevant kategori: 
+        {article_text}
+        
+        Viktigt: Svara endast med EN kategori:
+        Viktigt: Nyheter är inte en giltig kategori!!!!!!
+        """
+
+    kategori_resultat = subprocess.run(
+        ["ollama", "run", "gemma3:12b", Kategori_prompt],
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    kategori = kategori_resultat.stdout.strip()
+
+    klassifikation_prompt = f"""
+        Sammanfatta följande artikel som:
+        - Positiv
+        - Negativ
+        - Neutral
+        
+        Svara endast med ett av dessa tre ord.
+        
+        Artikel: 
+        {article_text}
+        """
+
+    klassifikation_resultat = subprocess.run(
+        ["ollama", "run", "gemma3:12b", klassifikation_prompt],
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    klassifikation = klassifikation_resultat.stdout.strip()
+
+    sammanfattning_prompt = f"""
+        Sammanfattade följande artikel i en mening: 
+        {article_text}
+        """
+
+    sammanfattning_result = subprocess.run(
+        ["ollama", "run", "gemma3:12b", sammanfattning_prompt],
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    sammanfattning = sammanfattning_result.stdout.strip()
+
+    print(f"{filename}:[{kategori}] {klassifikation} {datum} {sammanfattning}")
+
+    rows.append({
+        "Rubrik": rubrik_text,
+        "Filnamn": filename,
+        "Kategori": kategori, 
+        "Klassifikation": klassifikation,
+        "Datum": datum,
+        "Sammanfattning": sammanfattning
+    })
+    
+try: 
+    df_old = pd.read_csv("resultat.csv", encoding="utf-8")
+except FileNotFoundError:
+    df_old = pd.DataFrame(columns=["Rubrik","Filnamn", "Kategori", "Klassifikation", "Datum", "Sammanfattning"])
+    
+
+df_new = pd.DataFrame(rows)
+df_total = pd.concat([df_old, df_new], ignore_index=True)
+
+df_total.drop_duplicates(subset=["Rubrik"], inplace=True)
+
+df_total.to_csv("resultat.csv", index=False, encoding="utf-8")
+
+print("Ollama har tänkt klart, öppna resultat.csv.")

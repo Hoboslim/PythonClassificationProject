@@ -1,0 +1,107 @@
+import requests 
+from bs4 import BeautifulSoup
+import os
+import subprocess
+import pandas as pd
+from datetime import datetime
+
+
+url ="https://bbc.com"
+res = requests.get(url)
+soup = BeautifulSoup(res.text, 'html.parser')
+
+os.makedirs('artiklar', exist_ok=True)
+
+rubriker = soup.find_all("h2")
+
+rows = []
+datum = datetime.now().strftime("%d-%m-%Y, %H:%M")
+
+for i, rubrik in enumerate(rubriker[:15]):
+    text = rubrik.get_text(strip=True)
+    filename = f"artiklar/artikel{i+1}.txt"
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(text)
+    print (f"sparade {filename}")
+    
+    if not text.strip():
+        print(f"Hoppar över tom rubrik i {filename}")
+        continue    
+    
+    Kategori_prompt = f"""
+    kategorisera följande artikel i en relevant kategori: 
+    {text}
+    
+    Viktigt: Svara endast med EN kategori:
+    Viktigt: Nyheter är inte en giltig kategori!!!!!!
+    """
+    
+    kategori_resultat = subprocess.run(
+        ["ollama", "run", "gemma3:12b", Kategori_prompt],
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    kategori = kategori_resultat.stdout.strip()
+    
+    klassifikation_prompt = f"""
+    Sammanfatta följande artikel som:
+    - Positiv
+    - Negativ
+    - Neutral
+    
+    Svara endast med ett av dessa tre ord.
+    
+    Artikel: 
+    {text}
+    """
+    
+    klassifikation_resultat = subprocess.run(
+        ["ollama", "run", "gemma3:12b", klassifikation_prompt],
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    klassifikation = klassifikation_resultat.stdout.strip()
+    
+    sammanfattning_prompt = f"""
+    Sammanfattade följande artikel i en mening: 
+    {text}
+    """
+    
+    sammanfattning_result = subprocess.run(
+        ["ollama", "run", "gemma3:12b", sammanfattning_prompt],
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    sammanfattning = sammanfattning_result.stdout.strip()
+    
+    
+    
+    print(f"{filename}:[{kategori}] {klassifikation} {datum} {sammanfattning}")
+    
+    rows.append({
+        "Rubrik": text,
+        "Filnamn": filename,
+        "Kategori": kategori, 
+        "Klassifikation": klassifikation,
+        "Datum": datum,
+        "Sammanfattning": sammanfattning
+        })
+    
+try: 
+    df_old = pd.read_csv("resultat.csv", encoding="utf-8")
+except FileNotFoundError:
+    df_old = pd.DataFrame(columns=["Rubrik","Filnamn", "Kategori", "Klassifikation", "Datum", "Sammanfattning"])
+    
+
+df_new = pd.DataFrame(rows)
+df_total = pd.concat([df_old, df_new], ignore_index=True)
+
+df_total.drop_duplicates(subset=["Rubrik"], inplace=True)
+
+df_total.to_csv("resultat.csv", index=False, encoding="utf-8")
+
+print("Ollama har tänkt klart, öppna resultat.csv.")
